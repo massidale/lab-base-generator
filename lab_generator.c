@@ -4,15 +4,16 @@
  * Questo programma genera automaticamente la struttura di un laboratorio Kathara
  * con configurazione per diversi tipi di macchine (router con FRR, server web, host semplici).
  *
- * Uso: ./lab_generator nome:tipo nome:tipo ...
- *      ./lab_generator r1 r2 r3  (default: nessun servizio)
+ * Uso: ./lab_generator nome:tipo:LANs nome:tipo:LANs ...
+ *      ./lab_generator host1 host2 host3  (default: nessun servizio)
+ *      ./lab_generator r1:rip:ABC r2:ospf:BDE\n"
  *
  * Tipi supportati:
  *   - rip: router con protocollo RIP
  *   - ospf: router con protocollo OSPF
  *   - both: router con entrambi i protocolli (RIP + OSPF)
  *   - server: server web con Apache2
- *   - (vuoto o altro): host semplice senza servizi
+ *   - host (o vuoto): host semplice senza servizi
  *
  * Struttura generata:
  * lab/
@@ -138,10 +139,11 @@ char* generate_frr_conf_content(const char *protocol) {
             "!\n"
             "router ospf\n"
             "network (TODO) area (TODO)\n"
-            "!!!area (TODO) stub"
+            "!area (TODO) stub\n"
             "!\n"
-            "!!!interface eth(TODO)\n"
-            "!!!ospf cost (TODO)\n"
+            "!Rimuovere il commento per utilizzare\n"
+            "!interface eth(TODO)\n"
+            "!ospf cost (TODO)\n"
             "!\n"
             "log file /var/log/frr/frr.log\n");
     } else if (strcmp(protocol, "both") == 0) {
@@ -152,11 +154,13 @@ char* generate_frr_conf_content(const char *protocol) {
             "! RIP Configuration\n"
             "router rip\n"
             "network (TODO)\n"
+            "!area (TODO) stub\n"
             "!\n"
             "! OSPF Configuration\n"
             "router ospf\n"
             "network (TODO) area (TODO)\n"
             "!\n"
+            "!Rimuovere il commento per utilizzare\n"
             "!interface eth(TODO)\n"
             "!ospf cost (TODO)\n"
             "!\n"
@@ -177,23 +181,39 @@ char* generate_frr_conf_content(const char *protocol) {
  * Ritorna:
  *   Stringa allocata dinamicamente con il contenuto del file startup
  */
-char* generate_startup_content(const char *machine_type) {
-    char *content = malloc(256);
+char* generate_startup_content(const char *machine_type, const char *lans) {
+    char *content = malloc(1024);
+    char interfaces[512] = "";
+
+    // Genera configurazioni IP per ogni LAN
+    int lan_count = strlen(lans);
+    for (int i = 0; i < lan_count; i++) {
+        char line[128];
+        snprintf(line, sizeof(line), "ip address add (TODO) dev eth%d\n", i);
+        strcat(interfaces, line);
+    }
+
+    // Se non ci sono LAN, metti almeno una interfaccia di default
+    if (lan_count == 0) {
+        strcat(interfaces, "ip address add (TODO) dev eth(TODO)\n");
+    }
 
     if (strcmp(machine_type, "rip") == 0 || strcmp(machine_type, "ospf") == 0 || strcmp(machine_type, "both") == 0) {
         // Router con FRR
-        snprintf(content, 256,
-            "ip address add (TODO) dev eth(TODO)\n"
-            "systemctl start frr\n");
+        snprintf(content, 1024,
+            "%s"
+            "systemctl start frr\n", interfaces);
     } else if (strcmp(machine_type, "server") == 0) {
         // Server web con Apache
-        snprintf(content, 256,
-            "ip address add (TODO) dev eth(TODO)\n"
-            "systemctl start apache2\n");
-    } else {
+        snprintf(content, 1024,
+            "%s"
+            "systemctl start apache2\n", interfaces);
+    } else if (strcmp(machine_type, "host") == 0) {
         // Host semplice senza servizi
-        snprintf(content, 256,
-            "ip address add (TODO) dev eth(TODO)\n");
+        snprintf(content, 1024, "%s", interfaces);
+    } else {
+        // Non dovrebbe mai arrivare qui grazie alla validazione
+        snprintf(content, 1024, "%s", interfaces);
     }
 
     return content;
@@ -292,14 +312,14 @@ int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Uso: %s <nome[:tipo]> <nome[:tipo]> ...\n", argv[0]);
         printf("\nEsempi:\n");
-        printf("  %s r1:rip r2:ospf server1:server host1\n", argv[0]);
-        printf("  %s r1 r2 r3  (host semplici senza servizi)\n", argv[0]);
+        printf("  %s r1:rip:ABC r2:ospf:BD server1:server:A host1:host:C\n", argv[0]);
+        printf("  %s r1:rip r2:ospf host1:host  (senza LAN specificate)\n", argv[0]);
         printf("\nTipi supportati:\n");
         printf("  rip    - Router con protocollo RIP\n");
         printf("  ospf   - Router con protocollo OSPF\n");
         printf("  both   - Router con entrambi i protocolli (RIP + OSPF)\n");
         printf("  server - Server web con Apache2\n");
-        printf("  (vuoto)- Host semplice senza servizi\n");
+        printf("  host   - Host semplice senza servizi\n");
         return 1;
     }
 
@@ -315,25 +335,58 @@ int main(int argc, char *argv[]) {
         char filepath[512]; // Buffer per i percorsi dei file
         char machine_name[256];  // Nome della macchina
         char machine_type[32] = "";  // Tipo di macchina (vuoto = host semplice)
+        char lans[256] = "";  // LAN di collisione
 
-        // Parsing del nome macchina e tipo (formato: nome:tipo)
-        char *colon = strchr(argv[i], ':');
-        if (colon != NULL) {
-            // Estrai nome macchina e tipo
-            size_t name_len = colon - argv[i];
-            strncpy(machine_name, argv[i], name_len);
+        // Parsing del formato nome:tipo:lans
+        char *arg_copy = strdup(argv[i]);
+        char *first_colon = strchr(arg_copy, ':');
+
+        if (first_colon != NULL) {
+            // Estrai nome macchina
+            size_t name_len = first_colon - arg_copy;
+            strncpy(machine_name, arg_copy, name_len);
             machine_name[name_len] = '\0';
-            strcpy(machine_type, colon + 1);
+
+            // Cerca secondo ':' per le LAN
+            char *second_colon = strchr(first_colon + 1, ':');
+            if (second_colon != NULL) {
+                // Formato nome:tipo:lans
+                size_t type_len = second_colon - first_colon - 1;
+                strncpy(machine_type, first_colon + 1, type_len);
+                machine_type[type_len] = '\0';
+                strcpy(lans, second_colon + 1);
+            } else {
+                // Formato nome:tipo (senza LAN)
+                strcpy(machine_type, first_colon + 1);
+            }
         } else {
-            // Solo nome macchina, nessun tipo specifico (host semplice)
-            strcpy(machine_name, argv[i]);
+            // Solo nome macchina
+            strcpy(machine_name, arg_copy);
         }
 
-        printf("\nConfigurando macchina: %s", machine_name);
+        free(arg_copy);
+
+        // Valida il tipo di macchina
         if (strlen(machine_type) > 0) {
-            printf(" con tipo: %s\n", machine_type);
+            if (strcmp(machine_type, "rip") != 0 &&
+                strcmp(machine_type, "ospf") != 0 &&
+                strcmp(machine_type, "both") != 0 &&
+                strcmp(machine_type, "server") != 0 &&
+                strcmp(machine_type, "host") != 0) {
+                fprintf(stderr, "\nErrore: tipo '%s' non riconosciuto per macchina %s\n", machine_type, machine_name);
+                fprintf(stderr, "Tipi validi: rip, ospf, both, server, host\n");
+                continue;
+            }
         } else {
-            printf(" (host semplice)\n");
+            // Se non è specificato un tipo, usa "host" come default
+            strcpy(machine_type, "host");
+        }
+
+        printf("\nConfigurando macchina: %s con tipo: %s", machine_name, machine_type);
+        if (strlen(lans) > 0) {
+            printf(" - LAN: %s\n", lans);
+        } else {
+            printf("\n");
         }
 
         // STEP 2.1: Crea struttura directory e file in base al tipo di macchina
@@ -385,7 +438,7 @@ int main(int argc, char *argv[]) {
 
         // STEP 2.2: Crea il file .startup con i comandi di inizializzazione
         snprintf(filepath, sizeof(filepath), "lab/%s.startup", machine_name);
-        char *startup_content = generate_startup_content(machine_type);
+        char *startup_content = generate_startup_content(machine_type, lans);
         if (create_file_with_content(filepath, startup_content) != 0) {
             fprintf(stderr, "Errore creando file .startup per macchina %s\n", machine_name);
         } else {
@@ -402,23 +455,43 @@ int main(int argc, char *argv[]) {
     if (labconf == NULL) {
         fprintf(stderr, "Errore creando file lab.conf\n");
     } else {
-        // Genera una entry per ogni router
+        // Genera una entry per ogni macchina
         for (int i = 1; i < argc; i++) {
-            // Estrai solo il nome del router (prima del ':')
-            char router_name[256];
-            char *colon = strchr(argv[i], ':');
-            if (colon != NULL) {
-                size_t name_len = colon - argv[i];
-                strncpy(router_name, argv[i], name_len);
-                router_name[name_len] = '\0';
+            // Estrai nome macchina e LAN
+            char machine_name[256];
+            char lans[256] = "";
+            char *arg_copy = strdup(argv[i]);
+            char *first_colon = strchr(arg_copy, ':');
+
+            if (first_colon != NULL) {
+                // Estrai nome
+                size_t name_len = first_colon - arg_copy;
+                strncpy(machine_name, arg_copy, name_len);
+                machine_name[name_len] = '\0';
+
+                // Cerca LAN dopo il secondo ':'
+                char *second_colon = strchr(first_colon + 1, ':');
+                if (second_colon != NULL) {
+                    strcpy(lans, second_colon + 1);
+                }
             } else {
-                strcpy(router_name, argv[i]);
+                strcpy(machine_name, arg_copy);
             }
 
-            fprintf(labconf, "%s[0]=(TODO)\n", router_name);      // LAN del router
-            fprintf(labconf, "%s[image]=\"kathara/frr\"\n", router_name); // Immagine Docker
+            // Scrivi configurazione LAN nel lab.conf
+            if (strlen(lans) > 0) {
+                for (int j = 0; j < strlen(lans); j++) {
+                    fprintf(labconf, "%s[%d]=%c\n", machine_name, j, lans[j]);
+                }
+            } else {
+                fprintf(labconf, "%s[0]=(TODO)\n", machine_name);
+            }
 
-            // Aggiungi riga vuota tra i router (tranne l'ultimo)
+            fprintf(labconf, "%s[image]=\"kathara/frr\"\n", machine_name);
+
+            free(arg_copy);
+
+            // Aggiungi riga vuota tra le macchine (tranne l'ultima)
             if (i < argc - 1) {
                 fprintf(labconf, "\n");
             }
@@ -429,8 +502,6 @@ int main(int argc, char *argv[]) {
 
     // STEP 4: Stampa messaggio di completamento e istruzioni
     printf("\n✓ Struttura del lab creata con successo!\n");
-    printf("\nPer compilare: gcc -o lab_generator lab_generator.c\n");
-    printf("Per eseguire: ./lab_generator r1 r2 r3\n");
 
     return 0;  // Termina con successo
 }
