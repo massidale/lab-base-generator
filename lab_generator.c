@@ -4,16 +4,20 @@
  * Questo programma genera automaticamente la struttura di un laboratorio Kathara
  * con configurazione per diversi tipi di macchine (router con FRR, server web, host semplici).
  *
- * Uso: ./lab_generator nome:tipo:LANs nome:tipo:LANs ...
+ * Uso: ./lab_generator nome:igp[+egp]:LANs nome:igp[+egp]:LANs ...
  *      ./lab_generator host1 host2 host3  (default: nessun servizio)
- *      ./lab_generator r1:rip:ABC r2:ospf:BDE\n"
+ *      ./lab_generator r1:rip:ABC r2:ospf+bgp:BDE r3:both+bgp:CDE
  *
  * Tipi supportati:
- *   - rip: router con protocollo RIP
- *   - ospf: router con protocollo OSPF
- *   - both: router con entrambi i protocolli (RIP + OSPF)
- *   - server: server web con Apache2
- *   - host (o vuoto): host semplice senza servizi
+ *   IGP (Interior Gateway Protocol):
+ *     - rip: router con protocollo RIP
+ *     - ospf: router con protocollo OSPF
+ *     - both: router con entrambi i protocolli (RIP + OSPF)
+ *   EGP (Exterior Gateway Protocol):
+ *     - bgp: Border Gateway Protocol (usare con +, es: rip+bgp)
+ *   Altri:
+ *     - server: server web con Apache2
+ *     - host (o vuoto): host semplice senza servizi
  *
  * Struttura generata:
  * lab/
@@ -37,24 +41,26 @@
 
 /*
  * Funzione per generare il contenuto del file daemons
- * in base al protocollo di routing scelto (RIP o OSPF)
+ * in base ai protocolli di routing scelti (IGP e/o EGP)
  *
  * Parametri:
- *   protocol: stringa contenente "rip" o "ospf"
+ *   igp_protocol: stringa contenente "rip", "ospf" o "both"
+ *   has_bgp: 1 se BGP è attivo, 0 altrimenti
  *
  * Ritorna:
  *   Stringa allocata dinamicamente con il contenuto del file daemons
  */
-char* generate_daemons_content(const char *protocol) {
+char* generate_daemons_content(const char *igp_protocol, int has_bgp) {
     char *content = malloc(2048);
 
-    // Determina quale demone attivare in base al protocollo
-    const char *ospfd_value = (strcmp(protocol, "ospf") == 0 || strcmp(protocol, "both") == 0) ? "yes" : "no";
-    const char *ripd_value = (strcmp(protocol, "rip") == 0 || strcmp(protocol, "both") == 0) ? "yes" : "no";
+    // Determina quali demoni attivare in base ai protocolli
+    const char *ospfd_value = (strcmp(igp_protocol, "ospf") == 0 || strcmp(igp_protocol, "both") == 0) ? "yes" : "no";
+    const char *ripd_value = (strcmp(igp_protocol, "rip") == 0 || strcmp(igp_protocol, "both") == 0) ? "yes" : "no";
+    const char *bgpd_value = has_bgp ? "yes" : "no";
 
     snprintf(content, 2048,
         "zebra=yes\n"
-        "bgpd=no\n"
+        "bgpd=%s\n"
         "ospfd=%s\n"
         "ospf6d=no\n"
         "ripd=%s\n"
@@ -105,66 +111,114 @@ char* generate_daemons_content(const char *protocol) {
         "# or you can use \"all_wrap\" for all daemons, e.g. to use perf record:\n"
         "#   all_wrap=\"/usr/bin/perf record --call-graph -\"\n"
         "# the normal daemon command is added to this at the end.\n",
-        ospfd_value, ripd_value);
+        bgpd_value, ospfd_value, ripd_value);
 
     return content;
 }
 
 /*
  * Funzione per generare il contenuto del file frr.conf
- * in base al protocollo di routing scelto (RIP o OSPF)
+ * in base ai protocolli di routing scelti (IGP e/o EGP)
  *
  * Parametri:
- *   protocol: stringa contenente "rip" o "ospf"
+ *   igp_protocol: stringa contenente "rip", "ospf" o "both"
+ *   has_bgp: 1 se BGP è attivo, 0 altrimenti
  *
  * Ritorna:
  *   Stringa allocata dinamicamente con il contenuto del file frr.conf
  */
-char* generate_frr_conf_content(const char *protocol) {
-    char *content = malloc(1024);
+char* generate_frr_conf_content(const char *igp_protocol, int has_bgp) {
+    char *content = malloc(2048);
+    char bgp_config[512] = "";
 
-    if (strcmp(protocol, "rip") == 0) {
-        snprintf(content, 1024,
+    // Se BGP è attivo, aggiungi la configurazione BGP
+    if (has_bgp) {
+        snprintf(bgp_config, sizeof(bgp_config),
             "!\n"
-            "! FRRouting configuration file\n"
+            "! BGP Configuration\n"
             "!\n"
-            "router rip\n"
+            "router bgp (TODO)\n"
+            "   neighbor (TODO) remote-as (TODO)\n"
+            "!\n"
             "network (TODO)\n"
             "!\n"
-            "log file /var/log/frr/frr.log\n");
-    } else if (strcmp(protocol, "ospf") == 0) {
-        snprintf(content, 1024,
+            "!Rimuovere il commento per utilizzare\n"
+            "!no bgp network import-check\n"
+            "!no bgp ebgp-requires-policy\n"
+            "!\n"
+            "!neighbor (TODO) prefix-list peerIn in\n"
+            "!neighbor (TODO) prefix-list peerOut out\n"
+            "!\n"
+            "!ip prefix-list peerIn deny (TODO)\n"
+            "!ip prefix-list peerIn permit (TODO)\n"
+            "!\n"
+            "!ip prefix-list peerOut deny (TODO)\n"
+            "!ip prefix-list peerOut permit (TODO)\n"
+            "!\n"
+            "!neighbor (TODO) route-map prefIn in\n"
+            "!route-map prefIn permit 10\n"
+            "!    set local-preference 110\n"
+            "!\n"
+        );
+    }
+
+    if (strcmp(igp_protocol, "rip") == 0) {
+        snprintf(content, 2048,
             "!\n"
             "! FRRouting configuration file\n"
             "!\n"
+            "! RIP Configuration\n"
+            "!\n"
+            "router rip\n"
+            "   network (TODO)\n"
+            "!\n"
+            "%s"
+            "log file /var/log/frr/frr.log\n", bgp_config);
+    } else if (strcmp(igp_protocol, "ospf") == 0) {
+        snprintf(content, 2048,
+            "!\n"
+            "! FRRouting configuration file\n"
+            "!\n"
+            "! OSPF Configuration\n"
+            "!\n"
             "router ospf\n"
-            "network (TODO) area (TODO)\n"
-            "!area (TODO) stub\n"
+            "   network (TODO) area (TODO)\n"
+            "   !area (TODO) stub\n"
             "!\n"
             "!Rimuovere il commento per utilizzare\n"
             "!interface eth(TODO)\n"
             "!ospf cost (TODO)\n"
             "!\n"
-            "log file /var/log/frr/frr.log\n");
-    } else if (strcmp(protocol, "both") == 0) {
-        snprintf(content, 1024,
+            "%s"
+            "log file /var/log/frr/frr.log\n", bgp_config);
+    } else if (strcmp(igp_protocol, "bgp") == 0) {
+        snprintf(content, 2048,
+            "!\n"
+            "! FRRouting configuration file\n"
+            "!\n"
+            "%s"
+            "log file /var/log/frr/frr.log\n", bgp_config);
+    } else if (strcmp(igp_protocol, "both") == 0) {
+        snprintf(content, 2048,
             "!\n"
             "! FRRouting configuration file\n"
             "!\n"
             "! RIP Configuration\n"
             "router rip\n"
-            "network (TODO)\n"
-            "!area (TODO) stub\n"
+            "   network (TODO)\n"
             "!\n"
             "! OSPF Configuration\n"
+            "!\n"
             "router ospf\n"
-            "network (TODO) area (TODO)\n"
+            "   network (TODO) area (TODO)\n"
+            "   !area (TODO) stub\n"
             "!\n"
             "!Rimuovere il commento per utilizzare\n"
             "!interface eth(TODO)\n"
             "!ospf cost (TODO)\n"
             "!\n"
-            "log file /var/log/frr/frr.log\n");
+            "%s"
+            "log file /var/log/frr/frr.log\n", bgp_config);
     }
 
 
@@ -198,7 +252,7 @@ char* generate_startup_content(const char *machine_type, const char *lans) {
         strcat(interfaces, "ip address add (TODO) dev eth(TODO)\n");
     }
 
-    if (strcmp(machine_type, "rip") == 0 || strcmp(machine_type, "ospf") == 0 || strcmp(machine_type, "both") == 0) {
+    if (strcmp(machine_type, "rip") == 0 || strcmp(machine_type, "ospf") == 0 || strcmp(machine_type, "both") == 0 || strcmp(machine_type, "bgp") == 0) {
         // Router con FRR
         snprintf(content, 1024,
             "%s"
@@ -310,16 +364,22 @@ int create_file_with_content(const char *filepath, const char *content) {
 int main(int argc, char *argv[]) {
     // Verifica che siano stati passati dei router come argomenti
     if (argc < 2) {
-        printf("Uso: %s <nome[:tipo]> <nome[:tipo]> ...\n", argv[0]);
+        printf("Uso: %s <nome[:tipo[+bgp][:lans]]> <nome[:tipo[+bgp][:lans]]> ...\n", argv[0]);
         printf("\nEsempi:\n");
-        printf("  %s r1:rip:ABC r2:ospf:BD server1:server:A host1:host:C\n", argv[0]);
+        printf("  %s r1:rip:ABC r2:ospf+bgp:BD r3:both+bgp:CDE\n", argv[0]);
+        printf("  %s as1r1:rip+bgp:AB as2r1:ospf+bgp:BC  (con BGP)\n", argv[0]);
         printf("  %s r1:rip r2:ospf host1:host  (senza LAN specificate)\n", argv[0]);
         printf("\nTipi supportati:\n");
-        printf("  rip    - Router con protocollo RIP\n");
-        printf("  ospf   - Router con protocollo OSPF\n");
-        printf("  both   - Router con entrambi i protocolli (RIP + OSPF)\n");
-        printf("  server - Server web con Apache2\n");
-        printf("  host   - Host semplice senza servizi\n");
+        printf("  IGP (Interior Gateway Protocol):\n");
+        printf("    rip    - Router con protocollo RIP\n");
+        printf("    ospf   - Router con protocollo OSPF\n");
+        printf("    both   - Router con RIP + OSPF\n");
+        printf("    bgp    - Router con solo BGP\n");
+        printf("  EGP (Exterior Gateway Protocol):\n");
+        printf("    +bgp   - Aggiunge BGP a un IGP (es: rip+bgp)\n");
+        printf("  Altri:\n");
+        printf("    server - Server web con Apache2\n");
+        printf("    host   - Host semplice senza servizi\n");
         return 1;
     }
 
@@ -334,10 +394,11 @@ int main(int argc, char *argv[]) {
         char path[512];     // Buffer per i percorsi delle directory
         char filepath[512]; // Buffer per i percorsi dei file
         char machine_name[256];  // Nome della macchina
-        char machine_type[32] = "";  // Tipo di macchina (vuoto = host semplice)
+        char machine_type[32] = "";  // Tipo di macchina (IGP o server/host)
         char lans[256] = "";  // LAN di collisione
+        int has_bgp = 0;  // Flag per BGP
 
-        // Parsing del formato nome:tipo:lans
+        // Parsing del formato nome:tipo[+bgp]:lans
         char *arg_copy = strdup(argv[i]);
         char *first_colon = strchr(arg_copy, ':');
 
@@ -349,15 +410,37 @@ int main(int argc, char *argv[]) {
 
             // Cerca secondo ':' per le LAN
             char *second_colon = strchr(first_colon + 1, ':');
+            char type_str[64];
+
             if (second_colon != NULL) {
                 // Formato nome:tipo:lans
                 size_t type_len = second_colon - first_colon - 1;
-                strncpy(machine_type, first_colon + 1, type_len);
-                machine_type[type_len] = '\0';
+                strncpy(type_str, first_colon + 1, type_len);
+                type_str[type_len] = '\0';
                 strcpy(lans, second_colon + 1);
             } else {
                 // Formato nome:tipo (senza LAN)
-                strcpy(machine_type, first_colon + 1);
+                strcpy(type_str, first_colon + 1);
+            }
+
+            // Controlla se c'è +bgp nel tipo
+            char *plus = strchr(type_str, '+');
+            if (plus != NULL) {
+                *plus = '\0';  // Termina la stringa al '+'
+                strcpy(machine_type, type_str);
+                // Verifica che dopo '+' ci sia 'bgp'
+                if (strcmp(plus + 1, "bgp") == 0) {
+                    has_bgp = 1;
+                } else {
+                    fprintf(stderr, "\nErrore: EGP '%s' non riconosciuto per macchina %s (solo 'bgp' supportato)\n", plus + 1, machine_name);
+                    free(arg_copy);
+                    continue;
+                }
+            } else {
+                strcpy(machine_type, type_str);
+                if (strcmp(machine_type, "bgp") == 0) {
+                    has_bgp = 1;
+                }
             }
         } else {
             // Solo nome macchina
@@ -371,10 +454,11 @@ int main(int argc, char *argv[]) {
             if (strcmp(machine_type, "rip") != 0 &&
                 strcmp(machine_type, "ospf") != 0 &&
                 strcmp(machine_type, "both") != 0 &&
+                strcmp(machine_type, "bgp") != 0 &&
                 strcmp(machine_type, "server") != 0 &&
                 strcmp(machine_type, "host") != 0) {
                 fprintf(stderr, "\nErrore: tipo '%s' non riconosciuto per macchina %s\n", machine_type, machine_name);
-                fprintf(stderr, "Tipi validi: rip, ospf, both, server, host\n");
+                fprintf(stderr, "Tipi validi: rip, ospf, both, bgp, server, host\n");
                 continue;
             }
         } else {
@@ -383,6 +467,9 @@ int main(int argc, char *argv[]) {
         }
 
         printf("\nConfigurando macchina: %s con tipo: %s", machine_name, machine_type);
+        if (has_bgp) {
+            printf("+bgp");
+        }
         if (strlen(lans) > 0) {
             printf(" - LAN: %s\n", lans);
         } else {
@@ -390,7 +477,7 @@ int main(int argc, char *argv[]) {
         }
 
         // STEP 2.1: Crea struttura directory e file in base al tipo di macchina
-        if (strcmp(machine_type, "rip") == 0 || strcmp(machine_type, "ospf") == 0 || strcmp(machine_type, "both") == 0) {
+        if (strcmp(machine_type, "rip") == 0 || strcmp(machine_type, "ospf") == 0 || strcmp(machine_type, "both") == 0 || strcmp(machine_type, "bgp") == 0) {
             // ROUTER: Crea struttura FRR
             snprintf(path, sizeof(path), "lab/%s/etc/frr", machine_name);
             if (create_directory_recursive(path) != 0) {
@@ -400,7 +487,7 @@ int main(int argc, char *argv[]) {
 
             // Crea file daemons
             snprintf(filepath, sizeof(filepath), "lab/%s/etc/frr/daemons", machine_name);
-            char *daemons_content = generate_daemons_content(machine_type);
+            char *daemons_content = generate_daemons_content(machine_type, has_bgp);
             if (create_file_with_content(filepath, daemons_content) != 0) {
                 fprintf(stderr, "Errore creando file daemons per router %s\n", machine_name);
             } else {
@@ -410,7 +497,7 @@ int main(int argc, char *argv[]) {
 
             // Crea file frr.conf
             snprintf(filepath, sizeof(filepath), "lab/%s/etc/frr/frr.conf", machine_name);
-            char *frr_conf_content = generate_frr_conf_content(machine_type);
+            char *frr_conf_content = generate_frr_conf_content(machine_type, has_bgp);
             if (create_file_with_content(filepath, frr_conf_content) != 0) {
                 fprintf(stderr, "Errore creando file frr.conf per router %s\n", machine_name);
             } else {
