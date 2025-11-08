@@ -59,7 +59,7 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
             if peer["name"] == machine["name"] or not peer["has_bgp"]:
                 continue
             peer_as = machine_to_as.get(peer["name"])
-            if not peer_as or peer_as == as_number:
+            if not peer_as:
                 continue
             for m_conn in machine["connections"]:
                 for p_conn in peer["connections"]:
@@ -79,8 +79,7 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
         # Inserisce le righe generate nel template
         base_template = f"""router bgp {as_number}
 {neighbor_statements}
-   !
-   ! Annuncio network
+    !
 {network_statements}
    !
    !Rimuovere il commento per utilizzare
@@ -114,6 +113,8 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
 !
 router rip
    network (TODO)
+   !redistribute bgp
+   !redistribute connected
 !
 {bgp_config}
 log file /var/log/frr/frr.log
@@ -128,6 +129,8 @@ log file /var/log/frr/frr.log
 router ospf
    network (TODO) area (TODO)
    !area (TODO) stub
+   !redistribute bgp
+   !redistribute connected
 !
 {bgp_config}
 log file /var/log/frr/frr.log
@@ -140,12 +143,16 @@ log file /var/log/frr/frr.log
 ! RIP Configuration
 router rip
    network (TODO)
+   !redistribute bgp
+   !redistribute connected
 !
 ! OSPF Configuration
 !
 router ospf
    network (TODO) area (TODO)
    !area (TODO) stub
+   !redistribute bgp
+   !redistribute connected
 !
 {bgp_config}
 log file /var/log/frr/frr.log
