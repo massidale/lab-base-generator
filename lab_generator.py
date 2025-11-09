@@ -8,11 +8,12 @@ leggendo la configurazione da un file di testo.
 La logica di parsing è "a blocchi": le configurazioni di rete (rip/ospf)
 e dell'AS si applicano solo al gruppo di router che le precede nel file.
 La sezione 'lan' è globale e viene letta per ultima.
-Implementa l'auto-configurazione del peering eBGP e l'annuncio delle reti.
+Implementa l'auto-configurazione del peering eBGP/iBGP e l'annuncio delle reti.
 """
 
 import os
 import sys
+import re
 from collections import defaultdict
 
 INDEX_HTML_CONTENT = """<!DOCTYPE html><html><head><title>Kathara Web Server</title></head><body><h1>Hello World</h1><p>This is a Kathara lab web server.</p></body></html>"""
@@ -39,10 +40,10 @@ pbrd=no
 bfdd=no
 fabricd=no
 vtysh_enable=yes
-zebra_options=" -s 90000000 --daemon -A 127.0.0.1"
-bgpd_options="   --daemon -A 127.0.0.1"
-ospfd_options="  --daemon -A 127.0.0.1"
-ripd_options="   --daemon -A 127.0.0.1"
+zebra_options=\" -s 90000000 --daemon -A 127.0.0.1\"
+bgpd_options=\"   --daemon -A 127.0.0.1\"
+ospfd_options=\"  --daemon -A 127.0.0.1\"
+ripd_options=\"   --daemon -A 127.0.0.1\"
 """
 
 def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_config):
@@ -61,6 +62,7 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
             peer_as = machine_to_as.get(peer["name"])
             if not peer_as:
                 continue
+            
             for m_conn in machine["connections"]:
                 for p_conn in peer["connections"]:
                     if m_conn["lan"] == p_conn["lan"]:
@@ -68,18 +70,18 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
                         if lan_info:
                             peer_ip = f"{lan_info['network_base']}.{p_conn['octet']}"
                             neighbor_lines.append(f"   neighbor {peer_ip} remote-as {peer_as}")
-                            full_net = f"{lan_info['network_base']}.{lan_info['host_base']}/{lan_info['mask']}"
-                            networks_to_advertise.add(full_net)
+                            # Annuncia la LAN di peering solo se è un peering eBGP
+                            if peer_as != as_number:
+                                full_net = f"{lan_info['network_base']}.{lan_info['host_base']}/{lan_info['mask']}"
+                                networks_to_advertise.add(full_net)
         
-        neighbor_statements = "\n".join(sorted(neighbor_lines))
-        
-        # Genera le righe network con l'indentazione corretta
+        neighbor_statements = "\n".join(sorted(list(set(neighbor_lines))))
         network_statements = "\n".join([f"   network {net}" for net in sorted(list(networks_to_advertise))])
 
-        # Inserisce le righe generate nel template
         base_template = f"""router bgp {as_number}
 {neighbor_statements}
-    !
+   !
+   ! Annuncio network
 {network_statements}
    !
    !Rimuovere il commento per utilizzare
@@ -106,55 +108,34 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
 
     content = ""
     if machine_type == "rip":
-        template = f"""!
-! FRRouting configuration file
-!
-! RIP Configuration
-!
-router rip
+        template = f"""!\n! FRRouting configuration file
+!\n! RIP Configuration
+!\nrouter rip
    network (TODO)
-   !redistribute bgp
-   !redistribute connected
-!
-{bgp_config}
+!\n{bgp_config}
 log file /var/log/frr/frr.log
 """
         content = template.replace("   network (TODO)", rip_networks_str)
     elif machine_type == "ospf":
-        template = f"""!
-! FRRouting configuration file
-!
-! OSPF Configuration
-!
-router ospf
+        template = f"""!\n! FRRouting configuration file
+!\n! OSPF Configuration
+!\nrouter ospf
    network (TODO) area (TODO)
    !area (TODO) stub
-   !redistribute bgp
-   !redistribute connected
-!
-{bgp_config}
+!\n{bgp_config}
 log file /var/log/frr/frr.log
 """
         content = template.replace("   network (TODO) area (TODO)", ospf_networks_str)
     elif machine_type == "both":
-        template = f"""!
-! FRRouting configuration file
-!
-! RIP Configuration
+        template = f"""!\n! FRRouting configuration file
+!\n! RIP Configuration
 router rip
    network (TODO)
-   !redistribute bgp
-   !redistribute connected
-!
-! OSPF Configuration
-!
-router ospf
+!\n! OSPF Configuration
+!\nrouter ospf
    network (TODO) area (TODO)
    !area (TODO) stub
-   !redistribute bgp
-   !redistribute connected
-!
-{bgp_config}
+!\n{bgp_config}
 log file /var/log/frr/frr.log
 """
         content = template.replace("   network (TODO)", rip_networks_str)
@@ -187,25 +168,34 @@ def parse_and_generate(filepath):
     all_machines, generation_blocks, lan_config = [], [], {}
     current_block = defaultdict(list)
     mode = "machines"
+    
+    # Regex per identificare la parola chiave 'as' seguita da numeri
+    as_keyword_regex = re.compile(r'^as\d+$')
 
     with open(filepath, 'r') as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#'): continue
 
+            # La distinzione tra keyword e nome macchina ora è più robusta
+            is_keyword = True
+            if line == "rip": mode = "rip"
+            elif line == "ospf": mode = "ospf"
+            elif as_keyword_regex.match(line):
+                mode = "as"
+                current_block["as_number"] = line[2:]
+            elif line == "lan": mode = "lan"
+            else: is_keyword = False
+
+            if is_keyword:
+                continue
+
             if is_machine_definition(line):
                 if mode in ["rip", "ospf", "as"]:
                     if current_block["machines"]: generation_blocks.append(current_block)
                     current_block = defaultdict(list)
                 mode = "machines"
-            elif line == "rip": mode = "rip"; continue
-            elif line == "ospf": mode = "ospf"; continue
-            elif line.startswith("as"):
-                mode = "as"
-                current_block["as_number"] = line[2:]
-                continue
-            elif line == "lan": mode = "lan"; continue
-
+            
             if mode == "machines":
                 name, type_part, conn_part = line.split(':')
                 has_bgp = "+bgp" in type_part
@@ -273,7 +263,7 @@ def parse_and_generate(filepath):
         for machine in all_machines:
             name = machine['name']
             for i, conn in enumerate(machine["connections"]):
-                f.write("{}[{}]={}\n".format(name, i, conn['lan']))
+                f.write("{}[{{}}]={}\n".format(name, i, conn['lan']))
             f.write("{}[image]=\"kathara/frr\"\n\n".format(name))
     print(f"\nCreato: {lab_conf_path}")
     print("\n✓ Struttura del lab creata con successo!")
