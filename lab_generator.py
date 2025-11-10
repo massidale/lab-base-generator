@@ -4,11 +4,7 @@
 """
 LAB GENERATOR per KATHARA (versione Python)
 Questo script genera automaticamente la struttura di un laboratorio Kathara
-leggendo la configurazione da un file di testo.
-La logica di parsing è "a blocchi": le configurazioni di rete (rip/ospf)
-e dell'AS si applicano solo al gruppo di router che le precede nel file.
-La sezione 'lan' è globale e viene letta per ultima.
-Implementa l'auto-configurazione del peering eBGP/iBGP e l'annuncio delle reti.
+leggendo la configurazione da un file di testo strutturato a blocchi.
 """
 
 import os
@@ -68,11 +64,12 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
                     if m_conn["lan"] == p_conn["lan"]:
                         lan_info = lan_config.get(m_conn["lan"])
                         if lan_info:
-                            peer_ip = f"{lan_info['network_base']}.{p_conn['octet']}"
+                            peer_ip_base = ".".join(lan_info['network'].split('.')[:3])
+                            peer_ip = f"{peer_ip_base}.{p_conn['octet']}"
                             neighbor_lines.append(f"   neighbor {peer_ip} remote-as {peer_as}")
-                            # Annuncia la LAN di peering solo se è un peering eBGP
+                            
                             if peer_as != as_number:
-                                full_net = f"{lan_info['network_base']}.{lan_info['host_base']}/{lan_info['mask']}"
+                                full_net = f"{lan_info['network']}/{lan_info['mask']}"
                                 networks_to_advertise.add(full_net)
         
         neighbor_statements = "\n".join(sorted(list(set(neighbor_lines))))
@@ -85,8 +82,8 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
 {network_statements}
    !
    !Rimuovere il commento per utilizzare
-   !no bgp network import-check
-   !no bgp ebgp-requires-policy
+   no bgp network import-check
+   no bgp ebgp-requires-policy
    !
    !neighbor (TODO) prefix-list peerIn in
    !neighbor (TODO) prefix-list peerOut out
@@ -109,33 +106,43 @@ def generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_c
     content = ""
     if machine_type == "rip":
         template = f"""!\n! FRRouting configuration file
-!\n! RIP Configuration
-!\nrouter rip
+!
+! RIP Configuration
+!
+router rip
    network (TODO)
-!\n{bgp_config}
+!
+{bgp_config}
 log file /var/log/frr/frr.log
 """
         content = template.replace("   network (TODO)", rip_networks_str)
     elif machine_type == "ospf":
         template = f"""!\n! FRRouting configuration file
-!\n! OSPF Configuration
-!\nrouter ospf
+!
+! OSPF Configuration
+!
+router ospf
    network (TODO) area (TODO)
    !area (TODO) stub
-!\n{bgp_config}
+!
+{bgp_config}
 log file /var/log/frr/frr.log
 """
         content = template.replace("   network (TODO) area (TODO)", ospf_networks_str)
     elif machine_type == "both":
         template = f"""!\n! FRRouting configuration file
-!\n! RIP Configuration
+!
+! RIP Configuration
 router rip
    network (TODO)
-!\n! OSPF Configuration
-!\nrouter ospf
+!
+! OSPF Configuration
+!
+router ospf
    network (TODO) area (TODO)
    !area (TODO) stub
-!\n{bgp_config}
+!
+{bgp_config}
 log file /var/log/frr/frr.log
 """
         content = template.replace("   network (TODO)", rip_networks_str)
@@ -150,77 +157,97 @@ def generate_startup_content(machine, lan_config):
         lan_name = conn["lan"]
         lan_info = lan_config.get(lan_name)
         if lan_info:
-            ip = f"{lan_info['network_base']}.{conn['octet']}"
+            network_base = ".".join(lan_info['network'].split('.')[:3])
+            ip = f"{network_base}.{conn['octet']}"
             mask = lan_info['mask']
             content.append(f"ip address add {ip}/{mask} dev eth{i}")
+    
     machine_type = machine.get("type")
-    if machine_type in ["rip", "ospf", "both", "bgp"]:
+    has_bgp = machine.get("has_bgp", False)
+    
+    if machine_type in ["rip", "ospf", "both", "bgp"] or has_bgp:
         content.append("systemctl start frr")
     elif machine_type == "server":
         content.append("systemctl start apache2")
     return "\n".join(content) + "\n"
 
-def is_machine_definition(line):
-    parts = line.split(':')
-    return len(parts) == 3 and '.' in parts[2]
-
-def parse_and_generate(filepath):
+def parse_config_file(filepath):
+    """Esegue il parsing del file di configurazione strutturato a blocchi."""
     all_machines, generation_blocks, lan_config = [], [], {}
-    current_block = defaultdict(list)
-    mode = "machines"
-    
-    # Regex per identificare la parola chiave 'as' seguita da numeri
-    as_keyword_regex = re.compile(r'^as\d+$')
+    active_section = None
+    current_block = None
 
     with open(filepath, 'r') as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#'): continue
-
-            # La distinzione tra keyword e nome macchina ora è più robusta
-            is_keyword = True
-            if line == "rip": mode = "rip"
-            elif line == "ospf": mode = "ospf"
-            elif as_keyword_regex.match(line):
-                mode = "as"
-                current_block["as_number"] = line[2:]
-            elif line == "lan": mode = "lan"
-            else: is_keyword = False
-
-            if is_keyword:
+            if not line or line.startswith('#'):
                 continue
 
-            if is_machine_definition(line):
-                if mode in ["rip", "ospf", "as"]:
-                    if current_block["machines"]: generation_blocks.append(current_block)
+            # Gestione dei tag di sezione
+            if line.startswith('[') and line.endswith(']'):
+                if line == '[block]':
                     current_block = defaultdict(list)
-                mode = "machines"
-            
-            if mode == "machines":
+                    active_section = None
+                elif line == '[/block]':
+                    if current_block is not None:
+                        generation_blocks.append(current_block)
+                    current_block = None
+                    active_section = None
+                elif line.startswith('[/'):
+                    active_section = None
+                else:
+                    active_section = line[1:-1]
+                continue
+
+            # Processa il contenuto in base alla sezione attiva
+            if current_block is not None and active_section is None:
                 name, type_part, conn_part = line.split(':')
-                has_bgp = "+bgp" in type_part
-                machine_type = type_part.replace("+bgp", "")
+                
+                if "+bgp" in type_part:
+                    has_bgp = True
+                    machine_type = type_part.replace("+bgp", "")
+                elif type_part == "bgp":
+                    has_bgp = True
+                    machine_type = "bgp"
+                else:
+                    has_bgp = False
+                    machine_type = type_part
+
                 lans_str, octets_str = conn_part.split('.', 1)
                 octets = octets_str.split('.')
                 connections = [{"lan": lan_char, "octet": octets[i]} for i, lan_char in enumerate(lans_str)]
                 machine_data = {"name": name, "type": machine_type, "has_bgp": has_bgp, "connections": connections}
                 all_machines.append(machine_data)
                 current_block["machines"].append(machine_data)
-            elif mode == "rip": current_block["rip_networks"].append(line)
-            elif mode == "ospf":
+
+            elif active_section == "as" and current_block is not None:
+                if "as_number" not in current_block:
+                    current_block["as_number"] = line
+                else:
+                    current_block["manual_bgp_networks"].append(line)
+            
+            elif active_section == "rip" and current_block is not None:
+                current_block["rip_networks"].append(line)
+
+            elif active_section == "ospf" and current_block is not None:
                 net, area = line.split()
                 current_block["ospf_networks"].append({"network": net, "area": area})
-            elif mode == "as": current_block["manual_bgp_networks"].append(line)
-            elif mode == "lan":
+
+            elif active_section == "lan":
                 name, net_mask = line.split(':')
                 network, mask = net_mask.split('/')
-                parts = network.split('.')
-                network_base = ".".join(parts[:3])
-                host_base = parts[3]
-                lan_config[name] = {"network_base": network_base, "mask": mask, "host_base": host_base}
+                lan_config[name] = {"network": network, "mask": mask}
 
-    if current_block["machines"]: generation_blocks.append(current_block)
+    return all_machines, generation_blocks, lan_config
 
+def main(filepath):
+    """Funzione principale che orchestra la creazione del laboratorio."""
+    if not os.path.exists(filepath):
+        print(f"Errore: File di configurazione '{filepath}' non trovato.", file=sys.stderr)
+        sys.exit(1)
+
+    all_machines, generation_blocks, lan_config = parse_config_file(filepath)
+    
     machine_to_as = {m["name"]: b["as_number"] for b in generation_blocks if "as_number" in b for m in b["machines"]}
     print(f"Trovate {len(all_machines)} macchine in {len(generation_blocks)} blocchi, e {len(lan_config)} LAN.")
 
@@ -233,17 +260,18 @@ def parse_and_generate(filepath):
             m_type = machine["type"]
             has_bgp = machine["has_bgp"]
             
-            print(f"\nConfigurando macchina: {name} (tipo: {m_type}{'+bgp' if has_bgp else ''})")
+            print(f"\nConfigurando macchina: {name} (tipo: {m_type}{'+bgp' if has_bgp and m_type != 'bgp' else ''})")
 
-            if m_type in ["rip", "ospf", "both", "bgp"]:
-                frr_path = os.path.join(lab_dir, name, "etc", "frr")
-                os.makedirs(frr_path, exist_ok=True)
-                with open(os.path.join(frr_path, "daemons"), 'w') as f:
-                    f.write(generate_daemons_content(m_type, has_bgp))
-                print(f"  Creato: {os.path.join(frr_path, 'daemons')}")
-                with open(os.path.join(frr_path, "frr.conf"), 'w') as f:
-                    f.write(generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_config))
-                print(f"  Creato: {os.path.join(frr_path, 'frr.conf')}")
+            if m_type in ["rip", "ospf", "both", "bgp", "host"]:
+                if has_bgp or m_type in ["rip", "ospf", "both"]:
+                    frr_path = os.path.join(lab_dir, name, "etc", "frr")
+                    os.makedirs(frr_path, exist_ok=True)
+                    with open(os.path.join(frr_path, "daemons"), 'w') as f:
+                        f.write(generate_daemons_content(m_type, has_bgp))
+                    print(f"  Creato: {os.path.join(frr_path, 'daemons')}")
+                    with open(os.path.join(frr_path, "frr.conf"), 'w') as f:
+                        f.write(generate_frr_conf_content(machine, block, all_machines, machine_to_as, lan_config))
+                    print(f"  Creato: {os.path.join(frr_path, 'frr.conf')}")
             elif m_type == "server":
                 server_path = os.path.join(lab_dir, name, "var", "www", "html")
                 os.makedirs(server_path, exist_ok=True)
@@ -263,8 +291,8 @@ def parse_and_generate(filepath):
         for machine in all_machines:
             name = machine['name']
             for i, conn in enumerate(machine["connections"]):
-                f.write("{}[{{}}]={}\n".format(name, i, conn['lan']))
-            f.write("{}[image]=\"kathara/frr\"\n\n".format(name))
+                f.write(f"{name}[{i}]={conn['lan']}\n")
+            f.write(f"{name}[image]=\"kathara/frr\"\n\n")
     print(f"\nCreato: {lab_conf_path}")
     print("\n✓ Struttura del lab creata con successo!")
 
@@ -272,4 +300,5 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(f"Uso: {sys.argv[0]} <file_configurazione>", file=sys.stderr)
         sys.exit(1)
-    parse_and_generate(sys.argv[1])
+    
+    main(sys.argv[1])
